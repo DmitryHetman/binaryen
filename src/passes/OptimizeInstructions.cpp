@@ -158,9 +158,124 @@ struct Match {
     };
     return ExpressionManipulator::flexibleCopy(pattern.output, wasm, copy);
   }
-
-
 };
+
+// Utilities
+
+// returns the maximum amount of bits used in an integer expression
+// not extremely precise (doesn't look into add operands, etc.)
+static int maxBits(Expression* curr) {
+  if (auto* const_ = curr->dynCast<Const>() {
+    switch (curr->type) {
+      case i32: return 32 - const_->value.countLeadingZeroes().geti32();
+      case i64: return 64 - const_->value.countLeadingZeroes().geti64();
+      default: WASM_UNREACHABLE();
+    }
+  } else if (auto* binary = curr->dynCast<Binary>() {
+    switch (binary->op) {
+      // 32-bit
+      case AddInt32: case SubInt32: case: MulInt32:
+      case DivSInt32: case DivUInt32: case RemSInt32:
+      case RemUInt32: case RotLInt32: case RotRInt32: return 32;
+      case AndInt32: case XorInt32: return std::min(maxBits(binary->left), maxBits(binary->right));
+      case OrInt32: return std::max(maxBits(binary->left), maxBits(binary->right));
+      case ShlInt32: {
+        if (auto* shifts = binary->right->dynCast<Const>()) {
+          return std::min(32, maxBits(binary->left) + shifts->value.geti32());
+        }
+        return 32;
+      }
+      case ShrUInt32: {
+        if (auto* shifts = binary->right->dynCast<Const>()) {
+          return std::max(0, maxBits(binary->left) - shifts->value.geti32());
+        }
+        return 32;
+      }
+      case ShrSInt32: {
+        if (auto* shifts = binary->right->dynCast<Const>()) {
+          auto childMax = maxBits(binary->left);
+          if (childMax == 32) return 32;
+          return std::max(0, maxBits(binary->left) - shifts->value.geti32());
+        }
+        return 32;
+      }
+      case EqInt32: case NeInt32: case LtSInt32:
+      case LtUInt32: case LeSInt32: case LeUInt32:
+      case GtSInt32: case GtUInt32: case GeSInt32:
+      case GeUInt32: return 1;
+      // 64-bit
+      case AddInt64: case SubInt64: case: MulInt64:
+      case DivSInt64: case DivUInt64: case RemSInt64:
+      case RemUInt64: case RotLInt64: case RotRInt64: return 64;
+      case AndInt64: case XorInt64: return std::min(maxBits(binary->left), maxBits(binary->right));
+      case OrInt64: return std::max(maxBits(binary->left), maxBits(binary->right));
+      case ShlInt64: {
+        if (auto* shifts = binary->right->dynCast<Const>()) {
+          return std::min(64, maxBits(binary->left) + shifts->value.geti64());
+        }
+        return 64;
+      }
+      case ShrUInt64: {
+        if (auto* shifts = binary->right->dynCast<Const>()) {
+          return std::max(0, maxBits(binary->left) - shifts->value.geti64());
+        }
+        return 64;
+      }
+      case ShrSInt64: {
+        if (auto* shifts = binary->right->dynCast<Const>()) {
+          auto childMax = maxBits(binary->left);
+          if (childMax == 64) return 64;
+          return std::max(0, maxBits(binary->left) - shifts->value.geti64());
+        }
+        return 64;
+      }
+      case EqInt64: case NeInt64: case LtSInt64:
+      case LtUInt64: case LeSInt64: case LeUInt64:
+      case GtSInt64: case GtUInt64: case GeSInt64:
+      case GeUInt64: return 1;
+      default: WASM_UNREACHABLE();
+    }
+  } else if (auto* unary = curr->dynCast<Unary>()) {
+    switch (unary->op) {
+      case ClzInt32: case CtzInt32: case PopcntInt32: return 5;
+      case ClzInt64: case CtzInt64: case PopcntInt64: return 6;
+      case EqZInt32: case EqZInt64: return 1;
+      case ExtendSInt32: {
+        auto childMax = maxBits(binary->value);
+        return childMax == 32 ? 64 : childMax;
+      }
+      case ExtendUInt32: return maxBits(unary->value);
+      case WrapInt64: return std::min(32, maxBits(unary->value));
+      case TruncSFloat32ToInt32: case TruncUFloat32ToInt32: case TruncSFloat64ToInt32:
+      case TruncUFloat64ToInt32: case ReinterpretFloat32: return 32;
+      case TruncSFloat32ToInt64: case TruncUFloat32ToInt64: case TruncSFloat64ToInt64:
+      case TruncUFloat64ToInt64: case ReinterpretFloat64: return 64;
+      default: WASM_UNREACHABLE();
+    }
+  }
+  WASM_UNREACHABLE();
+}
+
+// Check if an expression is a sign-extend, and if so, returns the value
+// that is extended, otherwise nullptr
+static Expression* getSignExt(Expression* curr) {
+  if (auto* outer = curr->dynCast<Binary>()) {
+    if (outer->op == ShrSInt32) {
+      if (auto* outerConst = outer->right->dynCast<Const>()) {
+        if (auto* inner = outer->left->dynCast<Binary>()) {
+          if (inner->op == ShlInt32) {
+            if (auto* innerConst = inner->right->dynCast<Const>()) {
+              if (outerConst->value == innerConst->value) {
+                return inner->left;
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+  return nullptr;
+}
 
 // Main pass class
 struct OptimizeInstructions : public WalkerPass<PostWalker<OptimizeInstructions, UnifiedExpressionVisitor<OptimizeInstructions>>> {
