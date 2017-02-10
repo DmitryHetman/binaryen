@@ -165,16 +165,16 @@ struct Match {
 // returns the maximum amount of bits used in an integer expression
 // not extremely precise (doesn't look into add operands, etc.)
 static int maxBits(Expression* curr) {
-  if (auto* const_ = curr->dynCast<Const>() {
+  if (auto* const_ = curr->dynCast<Const>()) {
     switch (curr->type) {
       case i32: return 32 - const_->value.countLeadingZeroes().geti32();
       case i64: return 64 - const_->value.countLeadingZeroes().geti64();
       default: WASM_UNREACHABLE();
     }
-  } else if (auto* binary = curr->dynCast<Binary>() {
+  } else if (auto* binary = curr->dynCast<Binary>()) {
     switch (binary->op) {
       // 32-bit
-      case AddInt32: case SubInt32: case: MulInt32:
+      case AddInt32: case SubInt32: case MulInt32:
       case DivSInt32: case DivUInt32: case RemSInt32:
       case RemUInt32: case RotLInt32: case RotRInt32: return 32;
       case AndInt32: case XorInt32: return std::min(maxBits(binary->left), maxBits(binary->right));
@@ -204,20 +204,20 @@ static int maxBits(Expression* curr) {
       case GtSInt32: case GtUInt32: case GeSInt32:
       case GeUInt32: return 1;
       // 64-bit
-      case AddInt64: case SubInt64: case: MulInt64:
+      case AddInt64: case SubInt64: case MulInt64:
       case DivSInt64: case DivUInt64: case RemSInt64:
       case RemUInt64: case RotLInt64: case RotRInt64: return 64;
       case AndInt64: case XorInt64: return std::min(maxBits(binary->left), maxBits(binary->right));
       case OrInt64: return std::max(maxBits(binary->left), maxBits(binary->right));
       case ShlInt64: {
         if (auto* shifts = binary->right->dynCast<Const>()) {
-          return std::min(64, maxBits(binary->left) + shifts->value.geti64());
+          return std::min(int64_t(64), maxBits(binary->left) + shifts->value.geti64());
         }
         return 64;
       }
       case ShrUInt64: {
         if (auto* shifts = binary->right->dynCast<Const>()) {
-          return std::max(0, maxBits(binary->left) - shifts->value.geti64());
+          return std::max(int64_t(0), maxBits(binary->left) - shifts->value.geti64());
         }
         return 64;
       }
@@ -225,7 +225,7 @@ static int maxBits(Expression* curr) {
         if (auto* shifts = binary->right->dynCast<Const>()) {
           auto childMax = maxBits(binary->left);
           if (childMax == 64) return 64;
-          return std::max(0, maxBits(binary->left) - shifts->value.geti64());
+          return std::max(int64_t(0), maxBits(binary->left) - shifts->value.geti64());
         }
         return 64;
       }
@@ -241,7 +241,7 @@ static int maxBits(Expression* curr) {
       case ClzInt64: case CtzInt64: case PopcntInt64: return 6;
       case EqZInt32: case EqZInt64: return 1;
       case ExtendSInt32: {
-        auto childMax = maxBits(binary->value);
+        auto childMax = maxBits(unary->value);
         return childMax == 32 ? 64 : childMax;
       }
       case ExtendUInt32: return maxBits(unary->value);
@@ -275,6 +275,18 @@ static Expression* getSignExt(Expression* curr) {
     }
   }
   return nullptr;
+}
+
+// gets the size of the sign-extended value
+static Index getSignExtBits(Expression* curr) {
+  return 32 - curr->cast<Binary>()->right->cast<Const>()->value.geti32();
+}
+
+// get a mask to keep only the low # of bits
+static int32_t lowBitMask(int32_t bits) {
+  uint32_t ret = -1;
+  if (bits >= 32) return ret;
+  return ret >> (32 - bits);
 }
 
 // Main pass class
@@ -341,11 +353,13 @@ struct OptimizeInstructions : public WalkerPass<PostWalker<OptimizeInstructions,
             // equal 0 => eqz
             return Builder(*getModule()).makeUnary(EqZInt32, binary->left);
           }
-        }
-        if (auto* c = binary->left->dynCast<Const>()) {
-          if (c->value.geti32() == 0) {
-            // equal 0 => eqz
-            return Builder(*getModule()).makeUnary(EqZInt32, binary->right);
+          if (auto* ext = getSignExt(binary->left)) {
+            // we are comparing a sign extend to a constant, which means we can use a cheaper zext
+            auto bits = getSignExtBits(binary->left);
+            binary->left = makeZeroExt(ext, bits);
+            // the const we compare to only needs the relevant bits
+            c->value = c->value.and_(Literal(lowBitMask(bits)));
+            return binary;
           }
         }
       } else if (binary->op == AndInt32) {
@@ -560,6 +574,11 @@ private:
       last->value = Literal(int32_t(last->value.geti32() + offset));
       offset = 0;
     }
+  }
+
+  Expression* makeZeroExt(Expression* curr, int32_t bits) {
+    Builder builder(*getModule());
+    return builder.makeBinary(AndInt32, curr, builder.makeConst(Literal(bits)));
   }
 };
 
