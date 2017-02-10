@@ -362,6 +362,12 @@ struct OptimizeInstructions : public WalkerPass<PostWalker<OptimizeInstructions,
             return binary;
           }
         }
+        if (auto* c = binary->left->dynCast<Const>()) {
+          if (c->value.geti32() == 0) {
+            // equal 0 => eqz
+            return Builder(*getModule()).makeUnary(EqZInt32, binary->right);
+          }
+        }
       } else if (binary->op == AndInt32) {
         if (auto* right = binary->right->dynCast<Const>()) {
           if (right->type == i32) {
@@ -578,7 +584,7 @@ private:
 
   Expression* makeZeroExt(Expression* curr, int32_t bits) {
     Builder builder(*getModule());
-    return builder.makeBinary(AndInt32, curr, builder.makeConst(Literal(bits)));
+    return builder.makeBinary(AndInt32, curr, builder.makeConst(Literal(lowBitMask(bits))));
   }
 };
 
